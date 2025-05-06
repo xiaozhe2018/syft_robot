@@ -1,113 +1,112 @@
 package handler
 
 import (
-	"context"
 	"fmt"
+	"strconv"
+	"strings"
 
-	"github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/qx/syft_robot/api/internal/logic"
 	"github.com/qx/syft_robot/api/internal/svc"
 )
 
 type DinnerHandler struct {
 	svcCtx *svc.ServiceContext
+	dinnerLogic *logic.DinnerLogic
 }
 
-func NewDinnerHandler(svcCtx *svc.ServiceContext) *DinnerHandler {
+func NewDinnerHandler(svcCtx *svc.ServiceContext, dinnerLogic *logic.DinnerLogic) *DinnerHandler {
 	return &DinnerHandler{
 		svcCtx: svcCtx,
+		dinnerLogic: dinnerLogic,
 	}
 }
 
-func (h *DinnerHandler) HandleUpdate(update tgbotapi.Update) {
+func (h *DinnerHandler) HandleUpdate(update tgbotapi.Update) error {
+	if update.CallbackQuery != nil {
+		return h.handleCallback(update.CallbackQuery)
+	}
+
 	if update.Message != nil {
-		h.handleMessage(update.Message)
-	} else if update.CallbackQuery != nil {
-		h.handleCallback(update.CallbackQuery)
+		return h.handleMessage(update.Message)
 	}
+
+	return nil
 }
 
-func (h *DinnerHandler) handleMessage(message *tgbotapi.Message) {
-	if !message.IsCommand() {
-		return
+func (h *DinnerHandler) handleCallback(callback *tgbotapi.CallbackQuery) error {
+	data := callback.Data
+	chatID := callback.Message.Chat.ID
+	userID := callback.From.ID
+
+	// 检查回调数据是否以 dinner_signup_ 开头
+	if strings.HasPrefix(data, "dinner_signup_") {
+		// 提取按钮中的用户ID
+		parts := strings.Split(data, "_")
+		if len(parts) != 3 {
+			return fmt.Errorf("invalid callback data format: %s", data)
+		}
+		buttonUserID, err := strconv.ParseInt(parts[2], 10, 64)
+		if err != nil {
+			return fmt.Errorf("invalid user ID in callback data: %s", parts[2])
+		}
+
+		// 获取当前报名信息
+		key := fmt.Sprintf("dinner:%d", chatID)
+		dinner, err := h.dinnerLogic.GetDinner(key)
+		if err != nil {
+			return err
+		}
+
+		// 检查用户是否已报名
+		_, isSignedUp := dinner.UserSignups[userID]
+
+		// 如果是取消按钮，需要验证权限
+		if isSignedUp && buttonUserID != userID {
+			msg := tgbotapi.NewMessage(chatID, "请不要操作其他人的报名")
+			_, err = h.svcCtx.Bot.Send(msg)
+			return err
+		}
+
+		return h.dinnerLogic.HandleDinnerSignup(chatID, userID, callback.From.FirstName)
 	}
 
-	ctx := context.Background()
-	logic := logic.NewDinnerLogic(ctx, h.svcCtx)
+	return fmt.Errorf("unknown callback data: %s", data)
+}
 
-	switch message.Command() {
+func (h *DinnerHandler) handleMessage(message *tgbotapi.Message) error {
+	if !message.IsCommand() {
+		return nil
+	}
+
+	command := message.Command()
+	chatID := message.Chat.ID
+	userID := message.From.ID
+
+	switch command {
 	case "start":
-		msg := tgbotapi.NewMessage(message.Chat.ID,
-			"欢迎使用深夜饭堂机器人！\n"+
-				"使用以下命令：\n"+
-				"/dinner - 开始今天的晚餐报名\n"+
-				"/help - 显示帮助信息")
-		h.svcCtx.Bot.Send(msg)
+		msg := tgbotapi.NewMessage(chatID, "欢迎使用晚餐报名机器人！\n使用 /dinner 开始今天的报名")
+		_, err := h.svcCtx.Bot.Send(msg)
+		return err
 
 	case "help":
-		msg := tgbotapi.NewMessage(message.Chat.ID,
-			"📖 深夜饭堂机器人使用帮助：\n\n"+
-				"1. 管理员命令：\n"+
-				"   /dinner - 发起新的晚餐报名\n"+
-				"   /cancel - 取消当前报名（仅发起人可用）\n\n"+
-				"2. 报名规则：\n"+
-				"   - 每人每天只能报名一次\n"+
-				"   - 报名后不可取消\n"+
-				"   - 报名信息会在群内实时更新\n\n"+
-				"3. 其他命令：\n"+
-				"   /help - 显示本帮助信息")
-		h.svcCtx.Bot.Send(msg)
+		msg := tgbotapi.NewMessage(chatID, "可用命令：\n/dinner - 开始今天的晚餐报名\n/cancel - 取消当前报名（仅发起人可用）\n/quit - 取消自己的报名")
+		_, err := h.svcCtx.Bot.Send(msg)
+		return err
 
 	case "dinner":
-		err := logic.StartDinner(message.Chat.ID, message.From.ID)
-		if err != nil {
-			msg := tgbotapi.NewMessage(message.Chat.ID, "⚠️ "+err.Error())
-			h.svcCtx.Bot.Send(msg)
-		}
+		h.dinnerLogic.AddGroupID(chatID)
+		return h.dinnerLogic.StartDinner(chatID, userID)
 
 	case "cancel":
-		err := logic.CancelDinner(message.Chat.ID, message.From.ID)
-		if err != nil {
-			msg := tgbotapi.NewMessage(message.Chat.ID, "⚠️ "+err.Error())
-			h.svcCtx.Bot.Send(msg)
-		} else {
-			msg := tgbotapi.NewMessage(message.Chat.ID, "✅ 报名已取消。")
-			h.svcCtx.Bot.Send(msg)
-		}
+		return h.dinnerLogic.CancelDinner(chatID, userID)
+
+	case "quit":
+		return h.dinnerLogic.QuitDinner(chatID, userID, message.From.FirstName)
+
+	default:
+		msg := tgbotapi.NewMessage(chatID, "未知命令，请使用 /help 查看可用命令")
+		_, err := h.svcCtx.Bot.Send(msg)
+		return err
 	}
-}
-
-func (h *DinnerHandler) handleCallback(callback *tgbotapi.CallbackQuery) {
-	ctx := context.Background()
-	logic := logic.NewDinnerLogic(ctx, h.svcCtx)
-
-	userName := callback.From.FirstName
-	if callback.From.LastName != "" {
-		userName += " " + callback.From.LastName
-	}
-
-	err := logic.Signup(callback.Message.Chat.ID, callback.From.ID, userName)
-	if err != nil {
-		msg := tgbotapi.NewMessage(callback.Message.Chat.ID, "⚠️ "+err.Error())
-		h.svcCtx.Bot.Send(msg)
-	} else {
-		// 获取最新的报名人数
-		key := fmt.Sprintf("dinner:%d", callback.Message.Chat.ID)
-		dinner, err := logic.GetDinner(key)
-		if err != nil {
-			msg := tgbotapi.NewMessage(callback.Message.Chat.ID, "⚠️ "+err.Error())
-			h.svcCtx.Bot.Send(msg)
-			return
-		}
-
-		msg := tgbotapi.NewMessage(callback.Message.Chat.ID,
-			fmt.Sprintf("<b>✅ %s 报名成功！</b>\n当前报名人数：<code>%d</code>人",
-				userName, dinner.SignCount))
-		msg.ParseMode = "HTML"
-		h.svcCtx.Bot.Send(msg)
-	}
-
-	// 确认回调查询
-	callbackConfig := tgbotapi.NewCallback(callback.ID, "")
-	h.svcCtx.Bot.Request(callbackConfig)
 } 

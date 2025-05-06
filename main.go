@@ -33,7 +33,7 @@ type SignupInfo struct {
 }
 
 func main() {
-	bot, err := tgbotapi.NewBotAPI("your key")
+	bot, err := tgbotapi.NewBotAPI("8014139335:AAF6rgQUFdWBBZT9rsYRf40bJA9vNyPsoCo")
 	if err != nil {
 		log.Fatal(err)
 	}
