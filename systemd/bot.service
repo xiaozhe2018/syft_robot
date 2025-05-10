@@ -1,0 +1,19 @@
+[Unit]
+Description=Telegram Bot Service
+After=network.target redis.service
+Wants=redis.service
+
+[Service]
+Type=simple
+User=YOUR_USERNAME
+WorkingDirectory=/path/to/your/project
+ExecStart=/path/to/your/project/bot
+Restart=always
+RestartSec=10
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=telegram-bot
+Environment=TZ=Asia/Shanghai
+
+[Install]
+WantedBy=multi-user.target 

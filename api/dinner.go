@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"flag"
 	"log"
 
@@ -27,7 +26,7 @@ func main() {
 	svcCtx := svc.NewServiceContext(c)
 	
 	// 创建 DinnerLogic 实例
-	dinnerLogic := logic.NewDinnerLogic(context.Background(), svcCtx)
+	dinnerLogic := logic.NewDinnerLogic(svcCtx)
 	
 	handler := handler.NewDinnerHandler(svcCtx, dinnerLogic)
 
@@ -48,6 +47,26 @@ func main() {
 		{
 			Command:     "cancel",
 			Description: "取消当前报名（仅发起人可用）",
+		},
+		{
+			Command:     "accounting_start",
+			Description: "开始记账周期",
+		},
+		{
+			Command:     "accounting_end",
+			Description: "结束当前记账周期",
+		},
+		{
+			Command:     "accounting_status",
+			Description: "查看当前账单记录",
+		},
+		{
+			Command:     "accounting_expense",
+			Description: "添加支出记录",
+		},
+		{
+			Command:     "accounting_history",
+			Description: "查看历史记账记录",
 		},
 	}
 	_, err := svcCtx.Bot.Request(tgbotapi.NewSetMyCommands(commands...))

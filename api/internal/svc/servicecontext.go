@@ -1,9 +1,9 @@
 package svc
 
 import (
-	"github.com/go-telegram-bot-api/telegram-bot-api/v5"
-	"github.com/zeromicro/go-zero/core/stores/redis"
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/qx/syft_robot/api/internal/config"
+	"github.com/zeromicro/go-zero/core/stores/redis"
 )
 
 type ServiceContext struct {
@@ -19,7 +19,7 @@ func NewServiceContext(c config.Config) *ServiceContext {
 	}
 
 	redisClient := redis.MustNewRedis(c.Redis)
-
+	
 	return &ServiceContext{
 		Config: c,
 		Bot:    bot,

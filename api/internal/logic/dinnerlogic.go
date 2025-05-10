@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -49,6 +51,7 @@ func (l *DinnerLogic) LoadGroupIDs() {
 		return
 	}
 	if data == "" {
+		log.Printf("Redis中没有找到群组ID数据")
 		return
 	}
 
@@ -56,18 +59,21 @@ func (l *DinnerLogic) LoadGroupIDs() {
 	defer groupMu.Unlock()
 	if err := json.Unmarshal([]byte(data), &groupIDs); err != nil {
 		log.Printf("解析群组ID失败: %v", err)
+		return
 	}
+	
+	log.Printf("成功从Redis加载群组ID: %v", groupIDs)
 }
 
 type DinnerLogic struct {
-	ctx    context.Context
-	svcCtx *svc.ServiceContext
+	svcCtx         *svc.ServiceContext
+	accountingLogic *AccountingLogic
 }
 
-func NewDinnerLogic(ctx context.Context, svcCtx *svc.ServiceContext) *DinnerLogic {
+func NewDinnerLogic(svcCtx *svc.ServiceContext) *DinnerLogic {
 	return &DinnerLogic{
-		ctx:    ctx,
-		svcCtx: svcCtx,
+		svcCtx:         svcCtx,
+		accountingLogic: NewAccountingLogic(context.Background(), svcCtx),
 	}
 }
 
@@ -365,56 +371,170 @@ func (l *DinnerLogic) HandleDinnerSignup(chatID int64, userID int64, firstName s
 	return l.sendMenu(chatID, userID)
 }
 
+// 清理无效的群组ID
+func (l *DinnerLogic) cleanInvalidGroupIDs() {
+	groupMu.Lock()
+	defer groupMu.Unlock()
+	
+	invalidGroups := make([]int64, 0)
+	
+	// 检查每个群组
+	for chatID := range groupIDs {
+		log.Printf("正在检查群组 %d", chatID)
+		// 尝试发送一条测试消息
+		msg := tgbotapi.NewMessage(chatID, "测试消息")
+		_, err := l.svcCtx.Bot.Send(msg)
+		if err != nil {
+			log.Printf("群组 %d 无效，将被移除: %v", chatID, err)
+			invalidGroups = append(invalidGroups, chatID)
+		} else {
+			log.Printf("群组 %d 有效", chatID)
+		}
+	}
+	
+	// 移除无效的群组
+	for _, chatID := range invalidGroups {
+		delete(groupIDs, chatID)
+		log.Printf("已移除无效群组 %d", chatID)
+	}
+	
+	// 保存更新后的群组列表到Redis
+	key := "bot:groups"
+	data, err := json.Marshal(groupIDs)
+	if err != nil {
+		log.Printf("保存群组ID失败: %v", err)
+		return
+	}
+	err = l.svcCtx.Redis.Set(key, string(data))
+	if err != nil {
+		log.Printf("保存群组ID到Redis失败: %v", err)
+		return
+	}
+	
+	log.Printf("当前有效的群组列表: %v", groupIDs)
+	log.Printf("已清理 %d 个无效群组", len(invalidGroups))
+}
+
 func (l *DinnerLogic) StartReminder(testMode bool) {
 	// 加载已保存的群组ID
 	l.LoadGroupIDs()
-
-	// 如果是测试模式，立即发送一次消息
-	if testMode {
-		now := time.Now()
-		hour := now.Hour()
-		minute := now.Minute()
-
-		groupMu.RLock()
-		for chatID := range groupIDs {
-			msg := tgbotapi.NewMessage(chatID,
-				fmt.Sprintf("⏰ 当前时间为%d时%d分\n\n"+
-					"小哲提醒大家：\n"+
-					"该喝水了 💧\n"+
-					"该摸鱼了 🐟\n"+
-					"该抽烟了 🚬\n\n"+
-					"工作是人家的，命是自己的！\n"+
-					"每天8杯水，bug减一半——亲测无效，但至少能续命！", hour, minute))
-			l.svcCtx.Bot.Send(msg)
-		}
-		groupMu.RUnlock()
-		return
-	}
-
-	// 创建一个定时器，每分钟检查一次
+	
+	// 清理无效的群组ID
+	l.cleanInvalidGroupIDs()
+	
+	// 打印当前群组数量
+	groupMu.RLock()
+	groupCount := len(groupIDs)
+	groupMu.RUnlock()
+	log.Printf("已加载 %d 个群组", groupCount)
+	
 	ticker := time.NewTicker(time.Minute)
+	if testMode {
+		// 测试模式下使用10秒间隔
+		ticker = time.NewTicker(10 * time.Second)
+		log.Printf("测试模式已启动，每10秒发送一次提醒")
+	}
+	
 	go func() {
 		for range ticker.C {
 			now := time.Now()
 			hour := now.Hour()
 			minute := now.Minute()
 
-			// 检查是否在指定时间段内（9-12点和14-18点）
+			// 测试模式下不检查时间，直接发送提醒
+			if testMode {
+				// 向所有群组发送提醒
+				groupMu.RLock()
+				groupCount := len(groupIDs)
+				log.Printf("测试模式：准备向 %d 个群组发送提醒", groupCount)
+				
+				invalidGroups := make([]int64, 0)
+				for chatID := range groupIDs {
+					log.Printf("测试模式：正在向群组 %d 发送提醒", chatID)
+					msg := tgbotapi.NewMessage(chatID,
+						fmt.Sprintf("⏰ 测试模式提醒\n\n"+
+							"深夜饭堂提醒大家：\n"+
+							"该喝水了 💧\n"+
+							"该摸鱼了 🐟\n"+
+							"该抽烟了 🚬\n\n"+
+							"工作是人家的，命是自己的！\n"+
+							"每天8杯水，bug减一半——亲测无效，但至少能续命！"))
+					_, err := l.svcCtx.Bot.Send(msg)
+					if err != nil {
+						log.Printf("测试模式：向群组 %d 发送提醒失败: %v", chatID, err)
+						invalidGroups = append(invalidGroups, chatID)
+					} else {
+						log.Printf("测试模式：成功向群组 %d 发送提醒", chatID)
+					}
+				}
+				groupMu.RUnlock()
+				
+				// 如果有无效群组，移除它们
+				if len(invalidGroups) > 0 {
+					groupMu.Lock()
+					for _, chatID := range invalidGroups {
+						delete(groupIDs, chatID)
+						log.Printf("已移除无效群组 %d", chatID)
+					}
+					groupMu.Unlock()
+					
+					// 保存更新后的群组列表到Redis
+					key := "bot:groups"
+					data, err := json.Marshal(groupIDs)
+					if err == nil {
+						l.svcCtx.Redis.Set(key, string(data))
+						log.Printf("已更新Redis中的群组列表: %v", groupIDs)
+					}
+				}
+				
+				continue
+			}
+
+			// 正常模式下检查是否在指定时间段内（9-12点和14-18点）
 			if ((hour >= 9 && hour < 12) || (hour >= 14 && hour < 18)) && minute == 0 {
 				// 向所有群组发送提醒
 				groupMu.RLock()
+				groupCount := len(groupIDs)
+				log.Printf("正常模式：准备向 %d 个群组发送提醒", groupCount)
+				
+				invalidGroups := make([]int64, 0)
 				for chatID := range groupIDs {
+					log.Printf("正常模式：正在向群组 %d 发送提醒", chatID)
 					msg := tgbotapi.NewMessage(chatID,
 						fmt.Sprintf("⏰ 当前时间为%d时%d分\n\n"+
-							"小哲提醒大家：\n"+
+							"深夜饭堂提醒大家：\n"+
 							"该喝水了 💧\n"+
 							"该摸鱼了 🐟\n"+
 							"该抽烟了 🚬\n\n"+
 							"工作是人家的，命是自己的！\n"+
 							"每天8杯水，bug减一半——亲测无效，但至少能续命！", hour, minute))
-					l.svcCtx.Bot.Send(msg)
+					_, err := l.svcCtx.Bot.Send(msg)
+					if err != nil {
+						log.Printf("正常模式：向群组 %d 发送提醒失败: %v", chatID, err)
+						invalidGroups = append(invalidGroups, chatID)
+					} else {
+						log.Printf("正常模式：成功向群组 %d 发送提醒", chatID)
+					}
 				}
 				groupMu.RUnlock()
+				
+				// 如果有无效群组，移除它们
+				if len(invalidGroups) > 0 {
+					groupMu.Lock()
+					for _, chatID := range invalidGroups {
+						delete(groupIDs, chatID)
+						log.Printf("已移除无效群组 %d", chatID)
+					}
+					groupMu.Unlock()
+					
+					// 保存更新后的群组列表到Redis
+					key := "bot:groups"
+					data, err := json.Marshal(groupIDs)
+					if err == nil {
+						l.svcCtx.Redis.Set(key, string(data))
+						log.Printf("已更新Redis中的群组列表: %v", groupIDs)
+					}
+				}
 			}
 		}
 	}()
@@ -460,4 +580,80 @@ func (l *DinnerLogic) QuitDinner(chatID int64, userID int64, firstName string) e
 
 	// 更新菜单显示
 	return l.sendMenu(chatID, userID)
+}
+
+func parseExpenseAmountAndDescription(text string) (float64, string, error) {
+	// 移除所有空格
+	text = strings.ReplaceAll(text, " ", "")
+	
+	// 尝试匹配带括号的格式
+	re := regexp.MustCompile(`^(.+?)([+-]?\d+(?:\.\d+)?)(?:\((.+?)\))?$`)
+	matches := re.FindStringSubmatch(text)
+	if len(matches) >= 3 {
+		description := matches[1]
+		amountStr := matches[2]
+		note := ""
+		if len(matches) > 3 && matches[3] != "" {
+			note = "(" + matches[3] + ")"
+		}
+		
+		// 如果金额字符串包含负号，直接按负数处理
+		if strings.Contains(amountStr, "-") {
+			amountStr = strings.Replace(amountStr, "-", "", 1)
+			amount, err := strconv.ParseFloat(amountStr, 64)
+			if err == nil {
+				return -amount, description + note, nil
+			}
+		} else if strings.Contains(amountStr, "+") {
+			// 如果包含加号，按正数处理
+			amountStr = strings.Replace(amountStr, "+", "", 1)
+			amount, err := strconv.ParseFloat(amountStr, 64)
+			if err == nil {
+				return amount, description + note, nil
+			}
+		} else {
+			// 如果没有符号，默认为支出（负数）
+			amount, err := strconv.ParseFloat(amountStr, 64)
+			if err == nil {
+				return -amount, description + note, nil
+			}
+		}
+	}
+	
+	// 如果没有匹配到带括号的格式，尝试其他格式
+	parts := strings.Split(text, "-")
+	if len(parts) == 2 {
+		description := parts[0]
+		amount, err := strconv.ParseFloat(parts[1], 64)
+		if err == nil {
+			return -amount, description, nil
+		}
+	}
+	
+	// 尝试匹配标准格式：金额 描述
+	parts = strings.Split(text, " ")
+	if len(parts) == 2 {
+		amount, err := strconv.ParseFloat(parts[0], 64)
+		if err == nil {
+			// 如果没有负号，默认为支出（负数）
+			return -amount, parts[1], nil
+		}
+	}
+	
+	return 0, "", fmt.Errorf("无法解析金额和描述，请使用以下格式之一：\n1. 100 午餐（默认为支出）\n2. 午餐-100\n3. -100 午餐\n4. 午餐 -100\n5. 买菜-10(未报销)\n6. 工资+5000（收入需要加+号）")
+}
+
+// HandleExpenseReply 处理支出回复
+func (l *DinnerLogic) HandleExpenseReply(chatID int64, userID int64, text string) error {
+	amount, description, err := parseExpenseAmountAndDescription(text)
+	if err != nil {
+		return err
+	}
+
+	// 添加记录
+	if err := l.accountingLogic.AddExpense(chatID, userID, amount, description); err != nil {
+		return err
+	}
+
+	return nil
 } 

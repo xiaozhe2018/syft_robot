@@ -3,7 +3,7 @@ Host: 0.0.0.0
 Port: 8888
 
 Bot:
-  Token: "7233573079:AAFJSGGoI9eZ3dzP2nG59TLjWTET7S1UEDA"
+  Token: ""
 
 Redis:
   Host: 127.0.0.1:6379
